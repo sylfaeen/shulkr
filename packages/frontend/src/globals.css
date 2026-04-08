@@ -1,0 +1,158 @@
+@import 'tailwindcss';
+@import './styles/design-tokens.css';
+@import './styles/theme-light.css';
+@import './styles/theme-dark.css';
+@import './styles/shulkr.css';
+@import '@shulkr/shared/docs/prose-doc.css';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-input-border: var(--input-border);
+  --color-input-bg: var(--input-bg);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-status-online: var(--status-online);
+  --color-status-offline: var(--status-offline);
+  --color-status-warning: var(--status-warning);
+  --color-status-error: var(--status-error);
+
+  --font-family-body: var(--font-inter);
+  --font-family-mono: var(--font-jetbrains);
+
+  --shadow-card: var(--shadow-card);
+  --shadow-inner: var(--shadow-inner);
+  --shadow-inner-xs: var(--shadow-inner-xs);
+  --shadow-dialog: var(--shadow-dialog);
+
+  --animate-fade-in: fade-in var(--duration-normal) var(--ease-out);
+  --animate-scale-in: scale-in var(--duration-normal) var(--ease-out);
+  --animate-spin: spin 1s linear infinite;
+  --animate-dialog-in: dialog-in var(--duration-normal) var(--ease-out) both;
+  --animate-dialog-out: dialog-out var(--duration-fast) var(--ease-in) both;
+  --animate-overlay-in: overlay-in var(--duration-normal) var(--ease-out) both;
+  --animate-overlay-out: overlay-out var(--duration-fast) var(--ease-in) both;
+  --animate-toast-slide-in: toast-slide-in var(--duration-slow) var(--ease-out);
+  --animate-toast-slide-out: toast-slide-out var(--duration-fast) var(--ease-in) forwards;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.08) transparent;
+}
+
+*,
+*::before,
+*::after {
+  transition:
+    background-color 0.2s ease,
+    color 0.15s ease;
+}
+
+.dark * {
+  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+}
+
+html {
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  font-family: var(--font-inter), serif;
+  color: #1a1a1b;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+html.dark {
+  color: #e4e4e7;
+  background-color: var(--background);
+}
+
+body {
+  min-height: 100dvh;
+}
+
+.font-jetbrains {
+  font-family: var(--font-jetbrains), 'Fira Code', monospace;
+}
+
+.font-quattrocento {
+  font-family: var(--font-quattrocento), serif;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+button,
+a {
+  @apply cursor-pointer;
+}
+
+code:not(pre code) {
+  background-color: #f2f4f2;
+  border-color: #022a0214;
+  @apply rounded-md;
+  border-style: solid;
+  border-width: 1px;
+  color: #141e12;
+  padding-inline: calc(var(--spacing) * 0.5);
+}
+
+.dark code:not(pre code) {
+  background-color: #27272a;
+  border-color: #ffffff14;
+  color: #e4e4e7;
+}
