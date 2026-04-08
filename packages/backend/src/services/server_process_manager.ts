@@ -1,0 +1,412 @@
+import { spawn, execSync, spawnSync, ChildProcess } from 'child_process';
+import { EventEmitter } from 'events';
+import path from 'path';
+import fs from 'fs';
+import { ErrorCodes } from '@shulkr/shared';
+import { parseConsoleLine } from '@shulkr/backend/lib/log_parser';
+
+export type ServerStatus = 'stopped' | 'starting' | 'running' | 'stopping';
+
+interface ServerConfig {
+  id: string;
+  name: string;
+  path: string;
+  jar_file: string | null;
+  min_ram: string;
+  max_ram: string;
+  jvm_flags: string;
+  java_port: number;
+  java_path: string | null;
+}
+
+interface ManagedServer {
+  config: ServerConfig;
+  process: ChildProcess | null;
+  status: ServerStatus;
+  pid: number | null;
+  startedAt: Date | null;
+}
+
+const AIKAR_FLAGS = [
+  '-XX:+UseG1GC',
+  '-XX:+ParallelRefProcEnabled',
+  '-XX:MaxGCPauseMillis=200',
+  '-XX:+UnlockExperimentalVMOptions',
+  '-XX:+DisableExplicitGC',
+  '-XX:+AlwaysPreTouch',
+  '-XX:G1NewSizePercent=30',
+  '-XX:G1MaxNewSizePercent=40',
+  '-XX:G1HeapRegionSize=8M',
+  '-XX:G1ReservePercent=20',
+  '-XX:G1HeapWastePercent=5',
+  '-XX:G1MixedGCCountTarget=4',
+  '-XX:InitiatingHeapOccupancyPercent=15',
+  '-XX:G1MixedGCLiveThresholdPercent=90',
+  '-XX:G1RSetUpdatingPauseTimePercent=5',
+  '-XX:SurvivorRatio=32',
+  '-XX:+PerfDisableSharedMem',
+  '-XX:MaxTenuringThreshold=1',
+  '-Dusing.aikars.flags=https://mcflags.emc.gs',
+  '-Daikars.new.flags=true',
+];
+
+const STOP_TIMEOUT_MS = 30000;
+
+interface ConsoleLogEntry {
+  type: 'stdout' | 'stderr';
+  data: string;
+  timestamp: number;
+  level?: string;
+  logTime?: string;
+}
+
+const CONSOLE_HISTORY_LIMIT = 500;
+
+class ServerProcessManager extends EventEmitter {
+  private servers: Map<string, ManagedServer> = new Map();
+  private lineBuffers: Map<string, { stdout: string; stderr: string }> = new Map();
+  private consoleHistory: Map<string, Array<ConsoleLogEntry>> = new Map();
+
+  private getLineBuffer(serverId: string) {
+    if (!this.lineBuffers.has(serverId)) {
+      this.lineBuffers.set(serverId, { stdout: '', stderr: '' });
+    }
+    return this.lineBuffers.get(serverId)!;
+  }
+
+  private addToHistory(serverId: string, entry: ConsoleLogEntry) {
+    if (!this.consoleHistory.has(serverId)) {
+      this.consoleHistory.set(serverId, []);
+    }
+    const history = this.consoleHistory.get(serverId)!;
+    history.push(entry);
+    if (history.length > CONSOLE_HISTORY_LIMIT) {
+      history.splice(0, history.length - CONSOLE_HISTORY_LIMIT);
+    }
+  }
+
+  getConsoleHistory(serverId: string): Array<ConsoleLogEntry> {
+    return this.consoleHistory.get(serverId) ?? [];
+  }
+
+  getStatus(serverId: string): { status: ServerStatus; pid: number | null; uptime: number | null } {
+    const server = this.servers.get(serverId);
+    if (!server) {
+      return { status: 'stopped', pid: null, uptime: null };
+    }
+
+    const uptime = server.startedAt ? Math.floor((Date.now() - server.startedAt.getTime()) / 1000) : null;
+
+    return {
+      status: server.status,
+      pid: server.pid,
+      uptime,
+    };
+  }
+
+  private findJava(): string | null {
+    const paths = [
+      '/usr/lib/jvm/temurin-25-jre/bin/java',
+      '/usr/lib/jvm/temurin-25-jdk/bin/java',
+      '/usr/lib/jvm/temurin-21-jre/bin/java',
+      '/usr/lib/jvm/temurin-21-jdk/bin/java',
+      '/usr/lib/jvm/temurin-17-jre/bin/java',
+      '/usr/lib/jvm/temurin-17-jdk/bin/java',
+      '/usr/lib/jvm/java-25-openjdk-amd64/bin/java',
+      '/usr/lib/jvm/java-25-openjdk-arm64/bin/java',
+      '/usr/lib/jvm/java-21-openjdk-amd64/bin/java',
+      '/usr/lib/jvm/java-21-openjdk-arm64/bin/java',
+      '/usr/lib/jvm/java-17-openjdk-amd64/bin/java',
+      '/usr/lib/jvm/java-17-openjdk-arm64/bin/java',
+      '/usr/bin/java',
+    ];
+
+    for (const p of paths) {
+      if (fs.existsSync(p)) return p;
+    }
+
+    try {
+      const result = execSync('which java', { encoding: 'utf-8' }).trim();
+      if (result && fs.existsSync(result)) return result;
+    } catch {}
+
+    return null;
+  }
+
+  private isJavaBinary(binaryPath: string): boolean {
+    try {
+      const result = spawnSync(binaryPath, ['-version'], {
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const combined = (result.stdout || '') + (result.stderr || '');
+      return /java|openjdk|jdk|jre/i.test(combined);
+    } catch {
+      return false;
+    }
+  }
+
+  async start(config: ServerConfig): Promise<{ success: boolean; error?: string }> {
+    const existing = this.servers.get(config.id);
+    if (existing && existing.status !== 'stopped') {
+      return { success: false, error: ErrorCodes.SERVER_ALREADY_RUNNING };
+    }
+
+    const javaPath = config.java_path && fs.existsSync(config.java_path) ? config.java_path : this.findJava();
+    if (!javaPath) {
+      return { success: false, error: ErrorCodes.SERVER_JAVA_NOT_FOUND };
+    }
+
+    if (!this.isJavaBinary(javaPath)) {
+      return { success: false, error: ErrorCodes.SERVER_JAVA_NOT_FOUND };
+    }
+
+    if (!config.jar_file) {
+      return { success: false, error: ErrorCodes.SERVER_JAR_NOT_FOUND };
+    }
+
+    const serverDir = config.path;
+    const jarPath = path.join(serverDir, config.jar_file);
+
+    if (!fs.existsSync(serverDir)) {
+      return { success: false, error: ErrorCodes.SERVER_DIR_NOT_FOUND };
+    }
+
+    if (!fs.existsSync(jarPath)) {
+      return { success: false, error: ErrorCodes.SERVER_JAR_NOT_FOUND };
+    }
+
+    const jvmArgs: Array<string> = [
+      `-Xms${config.min_ram}`,
+      `-Xmx${config.max_ram}`,
+      ...AIKAR_FLAGS,
+      '-Djline.terminal=dumb',
+      '-Dterminal.jline=false',
+      '-Dterminal.ansi=true',
+    ];
+
+    if (config.jvm_flags) {
+      const customFlags = config.jvm_flags.split(' ').filter((f) => f.trim());
+      jvmArgs.push(...customFlags);
+    }
+
+    jvmArgs.push('-jar', config.jar_file, 'nogui');
+
+    const managedServer: ManagedServer = {
+      config,
+      process: null,
+      status: 'starting',
+      pid: null,
+      startedAt: null,
+    };
+    this.servers.set(config.id, managedServer);
+
+    try {
+      const proc = spawn(javaPath, jvmArgs, {
+        cwd: serverDir,
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      const spawnResult = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+        const timeout = setTimeout(() => {
+          if (proc.pid) {
+            resolve({ success: true });
+          } else {
+            resolve({ success: false, error: ErrorCodes.SERVER_START_FAILED });
+          }
+        }, 500);
+
+        proc.on('error', (error) => {
+          clearTimeout(timeout);
+          this.lineBuffers.delete(config.id);
+          managedServer.status = 'stopped';
+          managedServer.process = null;
+          managedServer.pid = null;
+          this.emit('server:error', { serverId: config.id, error: error.message });
+          resolve({ success: false, error: error.message });
+        });
+
+        proc.on('spawn', () => {
+          clearTimeout(timeout);
+          resolve({ success: true });
+        });
+      });
+
+      if (!spawnResult.success) {
+        managedServer.status = 'stopped';
+        return spawnResult;
+      }
+
+      managedServer.process = proc;
+      managedServer.pid = proc.pid || null;
+      managedServer.status = 'running';
+      managedServer.startedAt = new Date();
+
+      proc.stdout?.on('data', (data: Buffer) => {
+        const buffer = this.getLineBuffer(config.id);
+        buffer.stdout += data.toString();
+        const lines = buffer.stdout.split(/\r?\n/);
+
+        buffer.stdout = lines.pop() || '';
+
+        lines.forEach((line) => {
+          if (line.trim()) {
+            const parsed = parseConsoleLine(line);
+            this.addToHistory(config.id, {
+              type: 'stdout',
+              data: parsed.content,
+              timestamp: Date.now(),
+              level: parsed.level,
+              logTime: parsed.time,
+            });
+            this.emit('console:output', {
+              serverId: config.id,
+              type: 'stdout',
+              data: parsed.content,
+              level: parsed.level,
+              logTime: parsed.time,
+            });
+          }
+        });
+      });
+
+      proc.stderr?.on('data', (data: Buffer) => {
+        const buffer = this.getLineBuffer(config.id);
+        buffer.stderr += data.toString();
+        const lines = buffer.stderr.split(/\r?\n/);
+
+        buffer.stderr = lines.pop() || '';
+
+        lines.forEach((line) => {
+          if (line.trim()) {
+            const parsed = parseConsoleLine(line);
+            this.addToHistory(config.id, {
+              type: 'stderr',
+              data: parsed.content,
+              timestamp: Date.now(),
+              level: parsed.level,
+              logTime: parsed.time,
+            });
+            this.emit('console:output', {
+              serverId: config.id,
+              type: 'stderr',
+              data: parsed.content,
+              level: parsed.level,
+              logTime: parsed.time,
+            });
+          }
+        });
+      });
+
+      proc.on('exit', (code, signal) => {
+        this.lineBuffers.delete(config.id);
+        managedServer.status = 'stopped';
+        managedServer.process = null;
+        managedServer.pid = null;
+        managedServer.startedAt = null;
+        this.emit('server:stopped', { serverId: config.id, code, signal });
+      });
+
+      proc.on('error', (error) => {
+        this.lineBuffers.delete(config.id);
+        managedServer.status = 'stopped';
+        managedServer.process = null;
+        managedServer.pid = null;
+        this.emit('server:error', { serverId: config.id, error: error.message });
+      });
+
+      this.emit('server:started', { serverId: config.id, pid: proc.pid });
+      return { success: true };
+    } catch {
+      managedServer.status = 'stopped';
+      return { success: false, error: ErrorCodes.SERVER_START_FAILED };
+    }
+  }
+
+  async stop(serverId: string): Promise<{ success: boolean; error?: string }> {
+    const server = this.servers.get(serverId);
+    if (!server || server.status === 'stopped' || !server.process) {
+      return { success: false, error: ErrorCodes.SERVER_NOT_RUNNING };
+    }
+
+    if (server.status === 'stopping') {
+      return { success: false, error: ErrorCodes.SERVER_ALREADY_STOPPING };
+    }
+
+    server.status = 'stopping';
+
+    return new Promise((resolve) => {
+      const proc = server.process!;
+
+      const killTimeout = setTimeout(() => {
+        if (server.status === 'stopping') {
+          proc.kill('SIGKILL');
+        }
+      }, STOP_TIMEOUT_MS);
+
+      proc.once('exit', () => {
+        clearTimeout(killTimeout);
+        resolve({ success: true });
+      });
+
+      if (proc.stdin?.writable) {
+        proc.stdin.write('stop\n');
+      }
+
+      setTimeout(() => {
+        if (server.status === 'stopping' && proc.pid) {
+          proc.kill('SIGTERM');
+        }
+      }, 5000);
+    });
+  }
+
+  async restart(config: ServerConfig): Promise<{ success: boolean; error?: string }> {
+    const server = this.servers.get(config.id);
+
+    if (server && server.status !== 'stopped') {
+      const stopResult = await this.stop(config.id);
+      if (!stopResult.success) {
+        return stopResult;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    return this.start(config);
+  }
+
+  sendCommand(serverId: string, command: string): boolean {
+    const server = this.servers.get(serverId);
+    if (!server || server.status !== 'running' || !server.process?.stdin?.writable) {
+      return false;
+    }
+
+    server.process.stdin.write(command + '\n');
+    return true;
+  }
+
+  getRunningServers(): Array<string> {
+    const running: Array<string> = [];
+    this.servers.forEach((server, id) => {
+      if (server.status === 'running') {
+        running.push(id);
+      }
+    });
+    return running;
+  }
+
+  async shutdownAll(): Promise<void> {
+    const stopPromises: Array<Promise<unknown>> = [];
+    this.servers.forEach((server, id) => {
+      if (server.status !== 'stopped') {
+        stopPromises.push(this.stop(id));
+      }
+    });
+    await Promise.all(stopPromises);
+  }
+}
+
+export const serverProcessManager = new ServerProcessManager();
