@@ -1,0 +1,146 @@
+import { useState, useRef, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Check } from 'lucide-react';
+import { useMutation } from '@tanstack/react-query';
+import { cn } from '@shulkr/frontend/lib/cn';
+import { apiClient, raise } from '@shulkr/frontend/lib/api';
+import { useAuthStore } from '@shulkr/frontend/stores/auth_store';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@shulkr/frontend/features/ui/shadcn/dropdown-menu';
+
+const languages = [
+  { code: 'en', name: 'English', flagCode: 'gb' },
+  { code: 'fr', name: 'Français', flagCode: 'fr' },
+  { code: 'es', name: 'Español', flagCode: 'es' },
+  { code: 'de', name: 'Deutsch', flagCode: 'de' },
+];
+
+export function LanguageSelector() {
+  const { i18n } = useTranslation();
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const persistLocale = useUpdateLocale();
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleSelect = (code: string) => {
+    i18n.changeLanguage(code).then();
+    persistLocale(code);
+    setIsOpen(false);
+  };
+
+  return (
+    <div className={'relative'} ref={dropdownRef}>
+      <button
+        type={'button'}
+        onClick={() => setIsOpen(!isOpen)}
+        className={cn(
+          'flex size-9 items-center justify-center rounded-lg text-zinc-500 transition-all duration-(--duration-fast) hover:bg-zinc-100 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200',
+          isOpen && 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
+        )}
+        aria-label={'Select language'}
+      >
+        <span
+          className={cn(
+            `fi fi-${(languages.find((l) => l.code === i18n.language) || languages[0]).flagCode}`,
+            '!size-4 rounded-sm'
+          )}
+        />
+      </button>
+      {isOpen && (
+        <div
+          className={
+            'animate-scale-in absolute top-full right-0 mt-2 w-36 origin-top-right rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800'
+          }
+        >
+          {languages.map((lang) => (
+            <button
+              key={lang.code}
+              type={'button'}
+              onClick={() => handleSelect(lang.code)}
+              className={cn(
+                'flex w-full items-center gap-2.5 px-3 py-2 text-sm transition-colors duration-(--duration-fast)',
+                lang.code === i18n.language
+                  ? 'bg-green-50 text-green-600'
+                  : 'text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
+              )}
+            >
+              <span className={cn(`fi fi-${lang.flagCode}`, '!size-4 rounded-sm')} />
+              <span className={'flex-1 text-left'}>{lang.name}</span>
+              {lang.code === i18n.language && <Check className={'size-3.5 text-green-600'} strokeWidth={2} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function LanguageSelectorCompact() {
+  const { i18n } = useTranslation();
+  const persistLocale = useUpdateLocale();
+  const currentLang = languages.find((l) => l.code === i18n.language) || languages[0];
+
+  const handleSelect = (code: string) => {
+    i18n.changeLanguage(code).then();
+    persistLocale(code);
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type={'button'}
+          className={
+            'flex size-9 items-center justify-center rounded-lg text-zinc-600 transition-all duration-(--duration-fast) hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
+          }
+          aria-label={'Select language'}
+        >
+          <span className={cn(`fi fi-${currentLang.flagCode}`, '!size-4 rounded-sm')} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side={'top'} align={'end'}>
+        {languages.map((lang) => (
+          <DropdownMenuItem
+            key={lang.code}
+            onSelect={() => handleSelect(lang.code)}
+            className={cn(lang.code === i18n.language && 'bg-green-50 text-green-600 dark:bg-green-950/30 dark:text-green-400')}
+          >
+            <span className={cn(`fi fi-${lang.flagCode}`, '!size-4 rounded-sm')} />
+            <span className={'flex-1'}>{lang.name}</span>
+            {lang.code === i18n.language && <Check className={'size-3.5 text-green-600'} strokeWidth={2} />}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function useUpdateLocale() {
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const updateLocale = useMutation({
+    mutationFn: async (input: { locale: string }) => {
+      const result = await apiClient.users.updateLocale({ body: input });
+      if (result.status !== 200) raise(result.body, result.status);
+      return result.body;
+    },
+  });
+
+  return (code: string) => {
+    if (isAuthenticated) {
+      updateLocale.mutate({ locale: code });
+    }
+  };
+}
