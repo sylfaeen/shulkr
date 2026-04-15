@@ -1,0 +1,13 @@
+{
+  "server:start": "🟢 The server {{server}} has started.",
+  "server:stop": "🟠 The server {{server}} has stopped.",
+  "server:crash": "🔴 The server {{server}} has crashed: {{error}}",
+  "backup:success": "✅ A backup of {{server}} has been created successfully ({{filename}}).",
+  "backup:failure": "❌ The backup of {{server}} has failed: {{error}}",
+  "player:join": "📥 {{player}} joined the server {{server}}.",
+  "player:leave": "📤 {{player}} left the server {{server}}.",
+  "player:ban": "🔨 {{player}} has been banned from {{server}}.",
+  "task:success": "✅ The task {{task}} completed successfully on {{server}}.",
+  "task:failure": "❌ The task {{task}} failed on {{server}}: {{error}}",
+  "alert:triggered": "⚠️ Alert {{alert}} triggered on {{server}}: {{detail}}"
+}
