@@ -1,0 +1,5 @@
+name: shulkr-core
+main: dev.shulkr.core.waterfall.ShulkrCoreWaterfallPlugin
+version: ${version}
+author: shulkr
+description: shulkr companion agent — pushes verified telemetry to the shulkr panel.
