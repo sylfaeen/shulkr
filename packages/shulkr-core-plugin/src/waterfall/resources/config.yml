@@ -1,0 +1,8 @@
+# shulkr-core configuration (Waterfall/BungeeCord)
+# This file is managed by the shulkr panel; manual edits may be overwritten on reinstall.
+
+backend_url: http://127.0.0.1:3000
+server_id: ''
+token: ''
+push_interval_seconds: 5
+protocol_version: 1
