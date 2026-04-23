@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.turbo/
+.local/
+.claude/worktrees
+.env
+.vscode/
+.idea/
+.tessl/
+.mcp.json
+tessl.json
+.DS_Store
+npm-debug.log*
+pnpm-debug.log*
+*.tsbuildinfo
+packages/provisioning/data/
