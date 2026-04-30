@@ -1,0 +1,16 @@
+name: shulkr-core
+version: ${version}
+main: dev.shulkr.core.paper.ShulkrCorePaperPlugin
+folia-supported: true
+api-version: '1.19'
+authors: [shulkr]
+description: shulkr companion agent — pushes verified telemetry to the shulkr panel.
+commands:
+  shulkr:
+    description: shulkr-core admin commands (reload, status)
+    permission: shulkr.admin
+    usage: /shulkr <reload|status>
+permissions:
+  shulkr.admin:
+    description: Manage the shulkr-core plugin
+    default: op
