@@ -1,0 +1,9 @@
+node_modules
+dist
+.turbo
+.claude
+_bmad
+_bmad-output
+pnpm-lock.yaml
+*.min.js
+*.min.css
