@@ -1,0 +1,14 @@
+{
+  "server:start": "🟢 Le serveur {{server}} a démarré.",
+  "server:ready": "✅ Le serveur {{server}} est prêt à accepter les connexions.",
+  "server:stop": "🟠 Le serveur {{server}} s'est arrêté.",
+  "server:crash": "🔴 Le serveur {{server}} a crashé : {{error}}",
+  "backup:success": "✅ Une sauvegarde de {{server}} a été créée avec succès ({{filename}}).",
+  "backup:failure": "❌ La sauvegarde de {{server}} a échoué : {{error}}",
+  "player:join": "📥 {{player}} a rejoint le serveur {{server}}.",
+  "player:leave": "📤 {{player}} a quitté le serveur {{server}}.",
+  "player:ban": "🔨 {{player}} a été banni de {{server}}.",
+  "task:success": "✅ La tâche {{task}} s'est terminée avec succès sur {{server}}.",
+  "task:failure": "❌ La tâche {{task}} a échoué sur {{server}} : {{error}}",
+  "alert:triggered": "⚠️ Alerte {{alert}} déclenchée sur {{server}} : {{detail}}"
+}
