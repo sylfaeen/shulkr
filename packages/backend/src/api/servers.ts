@@ -1,0 +1,821 @@
+import { initServer } from '@ts-rest/fastify';
+import { contract } from '@shulkr/shared';
+import { eq } from 'drizzle-orm';
+import { backupMetadata } from '@shulkr/backend/db/schema';
+import {
+  backupServerAsync,
+  createServer,
+  deleteServer,
+  deleteServerBackup,
+  getAllServers,
+  getServerById,
+  listServerBackups,
+  renameServerBackup,
+  restartServer,
+  startServer,
+  stopServer,
+  updateServer,
+} from '@shulkr/backend/services/server_service';
+import { backupService } from '@shulkr/backend/services/backup_service';
+import {
+  createShareLink,
+  listShareLinks,
+  revokeShareLink,
+  deleteShareLinksForFilename,
+} from '@shulkr/backend/services/backup_share_service';
+import { getServerActivity, logAuditAction } from '@shulkr/backend/services/audit_service';
+import { getServerStrategy, setServerStrategy, uploadExistingBackup } from '@shulkr/backend/services/cloud_backup_strategy';
+import { ErrorCodes } from '@shulkr/shared';
+import { authenticate, assertPermissions, checkRateLimit, isMiddlewareError } from '@shulkr/backend/api/middleware';
+import { getAppDeps } from '@shulkr/backend/deps';
+
+const s = initServer();
+const ONE_MINUTE = 60_000;
+
+async function resolveServerIdFromBackupFilename(filename: string): Promise<string | undefined> {
+  const slugMatch = filename.match(/^([a-z0-9-]+?)-(?:manual|auto)/);
+  if (!slugMatch) return undefined;
+  const allServers = await getAllServers(getAppDeps());
+  const slug = slugMatch[1];
+
+  const server = allServers.find((s: { name: string; id: string }) => {
+    const serverSlug = s.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+
+    return serverSlug === slug;
+  });
+
+  return server?.id;
+}
+
+export const serversRoutes = s.router(contract.servers, {
+  list: async ({ request }) => {
+    try {
+      await authenticate(request);
+
+      const result = await getAllServers(getAppDeps());
+
+      return { status: 200 as const, body: result };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  byId: async ({ request, params }) => {
+    try {
+      await authenticate(request);
+
+      const server = await getServerById(getAppDeps(), params.id);
+
+      if (!server) {
+        return { status: 404 as const, body: { code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND } };
+      }
+
+      return { status: 200 as const, body: server };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  create: async ({ request, body }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'servers:create');
+      checkRateLimit(`user:${user.sub}:servers.create`, 10, ONE_MINUTE);
+
+      const server = await createServer(getAppDeps(), body);
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'create',
+        resourceType: 'server',
+        resourceId: server.id,
+        details: { name: body.name },
+        ip: request.ip,
+      });
+
+      return { status: 201 as const, body: { ...server, cpu: null, player_count: 0 } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+
+      if (error instanceof Error && error.message === ErrorCodes.SERVER_PORT_ALREADY_IN_USE) {
+        return {
+          status: 409 as const,
+          body: { code: ErrorCodes.SERVER_PORT_ALREADY_IN_USE, message: ErrorCodes.SERVER_PORT_ALREADY_IN_USE },
+        };
+      }
+
+      throw error;
+    }
+  },
+  update: async ({ request, params, body }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:general:update');
+      checkRateLimit(`user:${user.sub}:servers.update`, 10, ONE_MINUTE);
+
+      const id = params.id;
+      const result = await updateServer(getAppDeps(), id, body);
+
+      if (!result.success) {
+        if (result.error === ErrorCodes.SERVER_PORT_ALREADY_IN_USE) {
+          return {
+            status: 409 as const,
+            body: { code: ErrorCodes.SERVER_PORT_ALREADY_IN_USE, message: ErrorCodes.SERVER_PORT_ALREADY_IN_USE },
+          };
+        }
+
+        return { status: 404 as const, body: { code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND } };
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'update',
+        resourceType: 'server',
+        resourceId: id,
+        ip: request.ip,
+      });
+
+      const fullServer = await getServerById(getAppDeps(), id);
+
+      return { status: 200 as const, body: fullServer ?? { ...result.server, cpu: null, player_count: 0 } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  delete: async ({ request, params, query }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:general:delete');
+      checkRateLimit(`user:${user.sub}:servers.delete`, 10, ONE_MINUTE);
+
+      const id = params.id;
+
+      const result = await deleteServer(getAppDeps(), id, {
+        createBackup: query.createBackup ?? false,
+      });
+
+      if (!result.success) {
+        if (result.error === 'SERVER_NOT_FOUND') {
+          return { status: 404 as const, body: { code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND } };
+        }
+
+        if (result.error === 'SERVER_MUST_BE_STOPPED') {
+          return {
+            status: 409 as const,
+            body: { code: ErrorCodes.SERVER_MUST_BE_STOPPED, message: ErrorCodes.SERVER_MUST_BE_STOPPED },
+          };
+        }
+
+        if (result.error?.startsWith('BACKUP_FAILED')) {
+          return {
+            status: 500 as const,
+            body: { code: ErrorCodes.SERVER_BACKUP_FAILED, message: ErrorCodes.SERVER_BACKUP_FAILED },
+          };
+        }
+
+        if (result.error?.startsWith('DELETE_DIRECTORY_FAILED')) {
+          return {
+            status: 500 as const,
+            body: { code: ErrorCodes.SERVER_DELETE_FAILED, message: ErrorCodes.SERVER_DELETE_FAILED },
+          };
+        }
+
+        return {
+          status: 500 as const,
+          body: { code: ErrorCodes.SERVER_DELETE_FAILED, message: ErrorCodes.SERVER_DELETE_FAILED },
+        };
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'delete',
+        resourceType: 'server',
+        resourceId: id,
+        ip: request.ip,
+      });
+
+      return {
+        status: 200 as const,
+        body: {
+          message: 'Server deleted successfully',
+          backup: result.backup?.filename
+            ? {
+                filename: result.backup.filename,
+                path: result.backup.path ?? '',
+                size: result.backup.size ?? 0,
+              }
+            : undefined,
+        },
+      };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  listBackups: async ({ request, params }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:list');
+
+      const id = params.id;
+      const result = await listServerBackups(getAppDeps(), id);
+
+      if (!result.success) {
+        return { status: 404 as const, body: { code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND } };
+      }
+
+      // Collect pending backups so we can mark them as "creating" even if already on disk
+      const server = await getServerById(getAppDeps(), id);
+      const pendingMap = new Map<string, { progress: number; startedAt: string }>();
+
+      if (server) {
+        const slug = server.name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '');
+
+        const pending = backupService.getPendingBackups(slug);
+
+        for (const p of pending) {
+          pendingMap.set(p.filename, { progress: p.progress, startedAt: p.startedAt });
+        }
+      }
+
+      const metadataRows = await getAppDeps().db.select().from(backupMetadata).where(eq(backupMetadata.server_id, id));
+      const metadataByFilename = new Map(metadataRows.map((m) => [m.filename, m]));
+      type BackupListEntry = {
+        filename: string;
+        size: number;
+        created: string;
+        status: 'creating' | 'ready';
+        progress?: number;
+        location: 'local' | 'cloud' | 'hybrid';
+        cloudDestinationId?: string | null;
+        cloudUploadStatus?: 'uploading' | 'failed' | null;
+        cloudUploadError?: string | null;
+      };
+
+      const backups: Array<BackupListEntry> = result.backups.map((b) => {
+        const pending = pendingMap.get(b.name);
+        const meta = metadataByFilename.get(b.name);
+
+        return {
+          filename: b.name,
+          size: b.size,
+          created: b.date,
+          status: pending ? ('creating' as const) : ('ready' as const),
+          ...(pending && { progress: pending.progress }),
+          location: meta?.location ?? ('local' as const),
+          cloudDestinationId: meta?.cloud_destination_id ?? null,
+          cloudUploadStatus: meta?.cloud_upload_status ?? null,
+          cloudUploadError: meta?.cloud_upload_error ?? null,
+        };
+      });
+
+      // Add cloud-only backups (no local file) from backup_metadata
+      const diskFilenames = new Set(backups.map((b) => b.filename));
+
+      for (const meta of metadataRows) {
+        if (!diskFilenames.has(meta.filename) && meta.location === 'cloud') {
+          backups.push({
+            filename: meta.filename,
+            size: meta.size,
+            created: meta.created_at,
+            status: 'ready' as const,
+            location: 'cloud' as const,
+            cloudDestinationId: meta.cloud_destination_id,
+            cloudUploadStatus: meta.cloud_upload_status,
+            cloudUploadError: meta.cloud_upload_error,
+          });
+        }
+      }
+
+      // Add pending backups that haven't appeared on disk yet
+      if (server) {
+        const allFilenames = new Set(backups.map((b) => b.filename));
+
+        for (const [filename, info] of pendingMap) {
+          if (!allFilenames.has(filename)) {
+            backups.unshift({
+              filename,
+              size: 0,
+              created: info.startedAt,
+              status: 'creating' as const,
+              progress: info.progress,
+              location: 'local' as const,
+            });
+          }
+        }
+      }
+
+      return { status: 200 as const, body: backups };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  renameBackup: async ({ request, params, body }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:rename');
+      checkRateLimit(`user:${user.sub}:servers.renameBackup`, 20, ONE_MINUTE);
+
+      const result = await renameServerBackup(getAppDeps(), params.filename, body.newFilename);
+
+      if (!result.success) {
+        return { status: 200 as const, body: { message: result.error || 'Failed to rename backup' } };
+      }
+
+      const renameServerId = await resolveServerIdFromBackupFilename(params.filename);
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'rename_backup',
+        resourceType: 'backup',
+        resourceId: renameServerId,
+        details: { oldFilename: params.filename, newFilename: body.newFilename },
+        ip: request.ip,
+      });
+
+      return { status: 200 as const, body: { message: 'Backup renamed successfully' } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  uploadBackupToCloud: async ({ request, params, body }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:create');
+      checkRateLimit(`user:${user.sub}:servers.uploadBackupToCloud`, 20, ONE_MINUTE);
+
+      const serverId = await resolveServerIdFromBackupFilename(params.filename);
+
+      if (!serverId) {
+        return { status: 404 as const, body: { code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND } };
+      }
+
+      const result = await uploadExistingBackup(serverId, params.filename, body.cloudDestinationId);
+
+      if (!result.success) {
+        if (result.error === 'backup_not_found' || result.error === 'destination_not_found') {
+          return { status: 404 as const, body: { code: result.error, message: result.error } };
+        }
+
+        return { status: 400 as const, body: { code: result.error, message: result.error } };
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'upload_backup_to_cloud',
+        resourceType: 'backup',
+        resourceId: serverId,
+        details: { filename: params.filename, cloudDestinationId: body.cloudDestinationId },
+        ip: request.ip,
+      });
+
+      return { status: 202 as const, body: { message: 'Backup upload queued' } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  deleteBackup: async ({ request, params }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:delete');
+      checkRateLimit(`user:${user.sub}:servers.deleteBackup`, 50, ONE_MINUTE);
+
+      const result = await deleteServerBackup(getAppDeps(), params.filename);
+
+      if (!result.success) {
+        return { status: 200 as const, body: { message: result.error || 'Failed to delete backup' } };
+      }
+
+      await deleteShareLinksForFilename(getAppDeps(), params.filename);
+
+      const deleteServerId = await resolveServerIdFromBackupFilename(params.filename);
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'delete_backup',
+        resourceType: 'backup',
+        resourceId: deleteServerId,
+        details: { filename: params.filename },
+        ip: request.ip,
+      });
+
+      return { status: 200 as const, body: { message: 'Backup deleted successfully' } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  createBackupShareLink: async ({ request, params, body }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:share');
+      checkRateLimit(`user:${user.sub}:servers.createBackupShareLink`, 20, ONE_MINUTE);
+
+      const serverId = await resolveServerIdFromBackupFilename(params.filename);
+
+      let link: { token: string; preview: string; expiresAt: string };
+
+      try {
+        link = await createShareLink(getAppDeps(), {
+          filename: params.filename,
+          expiresInHours: body.expiresInHours,
+          createdBy: user.sub,
+          serverId,
+        });
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message === ErrorCodes.BACKUP_SHARE_NOT_LOCAL) {
+          return { status: 404 as const, body: { code: ErrorCodes.BACKUP_SHARE_NOT_LOCAL, message: ErrorCodes.BACKUP_SHARE_NOT_LOCAL } };
+        }
+
+        throw error;
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'create_backup_share_link',
+        resourceType: 'backup',
+        resourceId: serverId,
+        details: { filename: params.filename, expiresAt: link.expiresAt },
+        ip: request.ip,
+      });
+
+      return {
+        status: 201 as const,
+        body: {
+          token: link.token,
+          url: `/api/public/backups/${link.token}`,
+          preview: link.preview,
+          expiresAt: link.expiresAt,
+        },
+      };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  listBackupShareLinks: async ({ request, params }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:share');
+
+      const links = await listShareLinks(getAppDeps(), params.filename);
+
+      return {
+        status: 200 as const,
+        body: links.map((link) => ({
+          id: link.id,
+          preview: link.token_preview,
+          createdAt: link.created_at,
+          expiresAt: link.expires_at,
+          revoked: link.revoked_at !== null,
+          downloadCount: link.download_count,
+          lastDownloadedAt: link.last_downloaded_at,
+        })),
+      };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  revokeBackupShareLink: async ({ request, params }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:share');
+      checkRateLimit(`user:${user.sub}:servers.revokeBackupShareLink`, 20, ONE_MINUTE);
+
+      const revoked = await revokeShareLink(getAppDeps(), Number(params.id));
+
+      if (!revoked) {
+        return { status: 404 as const, body: { code: ErrorCodes.BACKUP_SHARE_NOT_FOUND, message: ErrorCodes.BACKUP_SHARE_NOT_FOUND } };
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'revoke_backup_share_link',
+        resourceType: 'backup',
+        details: { shareLinkId: params.id },
+        ip: request.ip,
+      });
+
+      return { status: 200 as const, body: { message: 'Share link revoked' } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  backup: async ({ request, params, body }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:create');
+      checkRateLimit(`user:${user.sub}:servers.backup`, 10, ONE_MINUTE);
+
+      const id = params.id;
+      const result = await backupServerAsync(getAppDeps(), id, body.paths);
+
+      if (!result.success) {
+        if (result.error === 'SERVER_NOT_FOUND') {
+          return { status: 200 as const, body: { message: 'Server not found' } };
+        }
+
+        return { status: 200 as const, body: { message: result.error || 'Backup failed' } };
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'create_backup',
+        resourceType: 'backup',
+        resourceId: String(id),
+        details: { filename: result.filename },
+        ip: request.ip,
+      });
+
+      return {
+        status: 200 as const,
+        body: {
+          message: 'Backup started',
+        },
+      };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  start: async ({ request, params }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:power:start');
+      checkRateLimit(`user:${user.sub}:servers.start`, 10, ONE_MINUTE);
+
+      const id = params.id;
+      const result = await startServer(getAppDeps(), id);
+
+      if (!result.success) {
+        const errorMap: Record<string, { status: 400 | 404; code: string; message: string }> = {
+          [ErrorCodes.SERVER_NOT_FOUND]: { status: 404, code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND },
+          [ErrorCodes.SERVER_ALREADY_RUNNING]: {
+            status: 400,
+            code: ErrorCodes.SERVER_ALREADY_RUNNING,
+            message: ErrorCodes.SERVER_ALREADY_RUNNING,
+          },
+          [ErrorCodes.SERVER_DIR_NOT_FOUND]: {
+            status: 400,
+            code: ErrorCodes.SERVER_DIR_NOT_FOUND,
+            message: ErrorCodes.SERVER_DIR_NOT_FOUND,
+          },
+          [ErrorCodes.SERVER_JAR_NOT_FOUND]: {
+            status: 400,
+            code: ErrorCodes.SERVER_JAR_NOT_FOUND,
+            message: ErrorCodes.SERVER_JAR_NOT_FOUND,
+          },
+          [ErrorCodes.SERVER_JAVA_NOT_FOUND]: {
+            status: 400,
+            code: ErrorCodes.SERVER_JAVA_NOT_FOUND,
+            message: ErrorCodes.SERVER_JAVA_NOT_FOUND,
+          },
+          [ErrorCodes.SERVER_START_FAILED]: {
+            status: 400,
+            code: ErrorCodes.SERVER_START_FAILED,
+            message: ErrorCodes.SERVER_START_FAILED,
+          },
+        };
+
+        const err = errorMap[result.error || ErrorCodes.SERVER_START_FAILED] || {
+          status: 400 as const,
+          code: ErrorCodes.SERVER_START_FAILED,
+          message: ErrorCodes.SERVER_START_FAILED,
+        };
+
+        if (err.status === 404) {
+          return { status: 404 as const, body: { code: err.code, message: err.message } };
+        }
+
+        return { status: 400 as const, body: { code: err.code, message: err.message } };
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'start',
+        resourceType: 'server',
+        resourceId: String(id),
+        ip: request.ip,
+      });
+
+      return { status: 200 as const, body: { message: 'Server started successfully' } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  stop: async ({ request, params }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:power:stop');
+      checkRateLimit(`user:${user.sub}:servers.stop`, 10, ONE_MINUTE);
+
+      const id = params.id;
+      const result = await stopServer(getAppDeps(), id);
+
+      if (!result.success) {
+        const errorMap: Record<string, { status: 400 | 404; code: string; message: string }> = {
+          [ErrorCodes.SERVER_NOT_FOUND]: { status: 404, code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND },
+          [ErrorCodes.SERVER_NOT_RUNNING]: {
+            status: 400,
+            code: ErrorCodes.SERVER_NOT_RUNNING,
+            message: ErrorCodes.SERVER_NOT_RUNNING,
+          },
+          [ErrorCodes.SERVER_ALREADY_STOPPING]: {
+            status: 400,
+            code: ErrorCodes.SERVER_ALREADY_STOPPING,
+            message: ErrorCodes.SERVER_ALREADY_STOPPING,
+          },
+        };
+
+        const err = errorMap[result.error || ErrorCodes.SERVER_STOP_FAILED] || {
+          status: 400 as const,
+          code: ErrorCodes.SERVER_STOP_FAILED,
+          message: ErrorCodes.SERVER_STOP_FAILED,
+        };
+
+        if (err.status === 404) {
+          return { status: 404 as const, body: { code: err.code, message: err.message } };
+        }
+
+        return { status: 400 as const, body: { code: err.code, message: err.message } };
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'stop',
+        resourceType: 'server',
+        resourceId: String(id),
+        ip: request.ip,
+      });
+
+      return { status: 200 as const, body: { message: 'Server stopped successfully' } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  restart: async ({ request, params }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:power:restart');
+      checkRateLimit(`user:${user.sub}:servers.restart`, 10, ONE_MINUTE);
+
+      const id = params.id;
+      const result = await restartServer(getAppDeps(), id);
+
+      if (!result.success) {
+        return { status: 200 as const, body: { message: result.error || 'Failed to restart server' } };
+      }
+
+      await logAuditAction(getAppDeps(), {
+        userId: user.sub,
+        username: user.username,
+        action: 'restart',
+        resourceType: 'server',
+        resourceId: String(id),
+        ip: request.ip,
+      });
+
+      return { status: 200 as const, body: { message: 'Server restarted successfully' } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  getBackupStrategy: async ({ request, params }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:list');
+
+      const server = await getServerById(getAppDeps(), params.id);
+
+      if (!server) {
+        return { status: 404 as const, body: { code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND } };
+      }
+
+      const strategy = await getServerStrategy(params.id);
+
+      return { status: 200 as const, body: strategy };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  updateBackupStrategy: async ({ request, params, body }) => {
+    try {
+      const user = await authenticate(request);
+      assertPermissions(user, 'server:backups:create');
+
+      const server = await getServerById(getAppDeps(), params.id);
+
+      if (!server) {
+        return { status: 404 as const, body: { code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND } };
+      }
+
+      if ((body.mode === 'cloud-only' || body.mode === 'hybrid') && !body.cloudDestinationId) {
+        return {
+          status: 400 as const,
+          body: { code: 'BAD_REQUEST', message: 'cloudDestinationId is required for cloud-only or hybrid mode' },
+        };
+      }
+
+      await setServerStrategy(params.id, body);
+
+      return { status: 200 as const, body: { message: 'Strategy updated' } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+  getActivity: async ({ request, params, query }) => {
+    try {
+      await authenticate(request);
+
+      const server = await getServerById(getAppDeps(), params.id);
+
+      if (!server) {
+        return { status: 404 as const, body: { code: ErrorCodes.SERVER_NOT_FOUND, message: ErrorCodes.SERVER_NOT_FOUND } };
+      }
+
+      const hours = query.hours ?? 24;
+      const limit = query.limit ?? 50;
+      const { auditRows, alertRows } = await getServerActivity(getAppDeps(), params.id, hours, limit);
+
+      const events: Array<
+        | {
+            source: 'audit';
+            id: number;
+            action: string;
+            resourceType: string;
+            username: string | null;
+            details: Record<string, string> | null;
+            createdAt: string;
+          }
+        | {
+            source: 'alert';
+            id: number;
+            metric: 'cpu' | 'ram' | 'disk' | 'tps';
+            value: number;
+            threshold: number;
+            ruleName: string | null;
+            createdAt: string;
+          }
+      > = [];
+
+      for (const row of auditRows) {
+        events.push({
+          source: 'audit',
+          id: row.id,
+          action: row.action,
+          resourceType: row.resource_type,
+          username: row.username ?? null,
+          details: row.details ? (JSON.parse(row.details) as Record<string, string>) : null,
+          createdAt: row.created_at,
+        });
+      }
+
+      for (const row of alertRows) {
+        events.push({
+          source: 'alert',
+          id: row.id,
+          metric: row.metric as 'cpu' | 'ram' | 'disk' | 'tps',
+          value: row.value,
+          threshold: row.threshold,
+          ruleName: row.ruleName,
+          createdAt: row.createdAt,
+        });
+      }
+
+      events.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+
+      return { status: 200 as const, body: { events: events.slice(0, limit) } };
+    } catch (error: unknown) {
+      if (isMiddlewareError(error)) return error;
+      throw error;
+    }
+  },
+});
