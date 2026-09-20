@@ -1,0 +1,25 @@
+node_modules/
+dist/
+.turbo/
+.local/
+.claude/worktrees
+.env
+.env.local
+.env.*.local
+.vscode/
+.idea/
+.tessl/
+.mcp.json
+tessl.json
+.DS_Store
+npm-debug.log*
+pnpm-debug.log*
+*.tsbuildinfo
+packages/provisioning/data/
+
+# Story 58.14 follow-up: never commit the encryption key (AES-256-GCM master for TOTP secrets, cloud creds, ...) or the SQLite database / journals.
+.encryption-key
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
