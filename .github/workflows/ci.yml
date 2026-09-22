@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  backend-typecheck:
+    name: Backend typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: tsc --noEmit
+        run: pnpm --filter @shulkr/backend exec tsc -b
+
+  backend-lint:
+    name: Backend lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Run eslint directly (the package "lint" script runs --fix which
+      # would modify files in CI). The current backend lint baseline is
+      # 68 warnings (story 58.7); CI currently only fails on errors —
+      # warnings are tracked manually until story 58.7 cleanup flips the
+      # backend-function-injection rule to 'error'.
+      - name: ESLint backend
+        run: pnpm --filter @shulkr/backend exec eslint src/
+
+  backend-test:
+    name: Backend test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Vitest
+        run: pnpm --filter @shulkr/backend test
