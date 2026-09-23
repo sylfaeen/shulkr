@@ -1,0 +1,155 @@
+# Databases
+
+Shulkr can create MariaDB databases for your plugins, one dedicated user per database, and optionally open a remote access limited to a single IP address for a website or an external tool.
+
+## What you get
+
+Creating a database from the panel runs three statements on the machine:
+
+```sql
+CREATE DATABASE `s_ab12cd_flyteams` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'u_ab12cd_flyteams'@'127.0.0.1' IDENTIFIED BY '<32 random bytes>' WITH MAX_USER_CONNECTIONS 30;
+GRANT ALL PRIVILEGES ON `s_ab12cd_flyteams`.* TO 'u_ab12cd_flyteams'@'127.0.0.1';
+```
+
+`ALL PRIVILEGES` applies to that database only. Your plugin can run its migrations, create and alter tables, read and write, and it can see nothing else. The `s_ab12cd_` prefix is unique per server, so two servers can both own a database called `flyteams` without ever reaching each other's.
+
+MariaDB is installed and hardened by `install.sh`, and listens on `127.0.0.1` only. Nothing is reachable from the internet until you create a remote access. Updating Shulkr never touches the engine: if it is missing on a machine, run `sudo /opt/shulkr/app/scripts/subs/subs_database.sh install`, which is the same idempotent step the installer runs.
+
+## Connecting a plugin
+
+Open your server, go to **Databases**, click **Create a database** and give it a name. The panel shows the credentials once and offers a ready to paste block:
+
+```yaml
+database:
+  host: 127.0.0.1
+  port: 3306
+  name: s_ab12cd_flyteams
+  user: u_ab12cd_flyteams
+  password: "..."
+```
+
+Paste it into the plugin configuration and restart the server. The host is `127.0.0.1` because the Minecraft server and MariaDB run on the same machine.
+
+To see the password again later, use the eye button: your account password is asked again and the reveal is written to the audit log.
+
+### Opening the database in a client
+
+The panel also shows a **connection URL**, the same kind Laravel Forge displays:
+
+```
+mysql+ssh://root@<server ip>/<db user>:<password>@127.0.0.1/<db name>?name=<label>&usePrivateKey=true
+```
+
+Paste it into TablePlus (or any client that reads these URLs) and it opens the SSH tunnel itself, then connects as if the database were local. Nothing needs to be opened on the firewall for this.
+
+The SSH account in the URL is `root`, which is the usual one on a self-hosted VPS. If you log in with another account, set `SSH_TUNNEL_USER` in `/opt/shulkr/app/.env` and restart the panel.
+
+A remote access shows a direct URL instead, with no tunnel, since it reaches the engine on its own.
+
+### Browsing the data
+
+The **browse** button opens the same viewer the panel uses for SQLite files: tables, schema, paginated rows, per-column filters, a SQL console, CSV and JSON export, and a global search.
+
+The connection it opens is read only, enforced by MariaDB itself (`SET SESSION TRANSACTION READ ONLY`), so no query typed in the console can modify anything, whatever it says. Unlike the SQLite viewer, nothing is downloaded into your browser: the database is queried where it lives, so its size does not matter.
+
+The **download** button streams a compressed dump straight to your browser. It is generated on the fly and never written to the server's disk.
+
+## Connecting a website or an external tool
+
+A plugin never needs this. It is for a site that displays your data, or for a database client on your own machine.
+
+In the database entry, open **Additional accesses** and add one:
+
+- **Name**: what this access is for, for example `flycraft-site`.
+- **Scope**: *read only* can consult the data, *read and write* can also add, edit and delete rows. Neither can change the structure of the tables, that stays with the plugin user.
+- **Allowed IP address**: one single address. Ranges, CIDR notations and wildcards are refused by the form, by the API and by the privileged script.
+- **Require a client certificate**: optional, see below.
+
+Creating the first remote access on the machine restarts MariaDB, because `bind-address` is instance-wide. Connected plugins are disconnected for a second or two, so prefer a quiet moment. When the last remote access is revoked, the engine goes back to listening on the loopback only.
+
+Three independent locks protect a remote access: the firewall only opens the port for that IP, the MariaDB grant is bound to that IP, and the connection must be encrypted.
+
+The engine runs with `skip-name-resolve`, which is what makes those per-IP grants work. Without it MariaDB reverse-resolves every client and compares the resulting hostname to the grant, so an access pinned to an address is refused as soon as that address has a PTR record, which most consumer connections do. An instance provisioned before this setting existed needs `sudo /opt/shulkr/app/scripts/subs/subs_database.sh install` once, which reapplies the configuration without touching any data or closing an open remote access.
+
+Example for a Laravel site, as a second connection in `config/database.php`:
+
+```php
+'shulkr' => [
+    'driver' => 'mysql',
+    'host' => env('SHULKR_DB_HOST'),
+    'port' => env('SHULKR_DB_PORT', '3306'),
+    'database' => env('SHULKR_DB_DATABASE'),
+    'username' => env('SHULKR_DB_USERNAME'),
+    'password' => env('SHULKR_DB_PASSWORD'),
+    'options' => [PDO::MYSQL_ATTR_SSL_CA => env('SHULKR_DB_SSL_CA')],
+],
+```
+
+Download the CA certificate from the panel and point `SHULKR_DB_SSL_CA` at it.
+
+A client that verifies the CA also verifies the name it dialled, so the server certificate carries the machine's IP address, its hostname and `localhost` as alternative names. If your server changes address, or if it was installed before this was the case, the certificate no longer matches and clients fail with `Cannot connect to MySQL using SSL`. Renew it with `sudo /opt/shulkr/app/scripts/subs/subs_database.sh renew-certificates`, then hand the new CA to every client. Set `SHULKR_DB_EXTRA_SAN="db.example.com 203.0.113.10"` before running it to add names of your own.
+
+That certificate belongs to the MariaDB instance, not to one access: the same file verifies the server for every remote access, on every database of this machine. Download it once and reuse it. It is only replaced if it expires, ten years from installation, and every client then needs the new one. A client certificate, on the other hand, is issued per access and only when you tick that option.
+
+### Why the connection URL works without any additional access
+
+The connection URL opens an **SSH tunnel** first. Your client logs into the machine over SSH, and only then opens a MySQL connection from inside it, to `127.0.0.1`. As far as MariaDB is concerned, that connection is local, exactly like a plugin's, so the plugin's own grant applies and nothing else is needed.
+
+No port is opened, the firewall is untouched, and MariaDB still listens only on the loopback. What authorised you was your SSH access to the server, not anything in the database layer. Anyone who can log into the machine can already read every plugin's `config.yml` and connect to MariaDB through the root socket: the tunnel grants nothing new.
+
+Additional accesses exist for the opposite case, a consumer that has **no** SSH access to the machine and only holds a database password, such as a website on another host.
+
+### About TLS
+
+Remote users are created with `REQUIRE SSL`, which forces encryption but does not authenticate anyone. With a self-signed certificate, a client that does not verify the CA is protected against passive eavesdropping, not against an active man in the middle. Configure the CA on the client side, it takes one line.
+
+Turning on **Require a client certificate** creates the user with `REQUIRE X509` instead and issues a certificate signed by the panel's own authority. A stolen password is then not enough to connect. The certificate and its key are shown once, at creation.
+
+If you lose them, the access entry has a reissue button that signs a fresh pair **and rotates the password at the same time**. That pairing is deliberate: `REQUIRE X509` accepts any certificate signed by our authority, so a new certificate on its own would leave the previous one working. Rotating the password makes the old pair useless. Update both on the client side after a reissue.
+
+### Dynamic IP addresses
+
+A home connection changes address. When yours changes, the access stops working: rotate it by revoking and recreating it with the new address. For development, an SSH tunnel is simpler and safer, and needs nothing on the panel side:
+
+```bash
+ssh -L 3306:127.0.0.1:3306 user@your-server
+```
+
+Your local client then connects to `127.0.0.1:3306` with no port open on the internet.
+
+An access with no observed activity for 30 days is flagged as unused in the panel. Revoke it: an IP address changes hands, a residential address gets reassigned and a destroyed VPS returns its own to the provider pool.
+
+## Rotating and deleting
+
+**Rotating a password** takes effect immediately on the MariaDB side. Plugins keep their open connections and fail on the next reconnection, which can happen hours later. Update the plugin configuration and restart the server right after rotating.
+
+**Deleting a database** asks you to type its full name. A compressed dump is written to `/var/lib/shulkr/db-dumps` before anything is dropped, owned by root, and pruned after 7 days. Restoring it requires SSH access, the panel does not offer a restore.
+
+Deleting a server drops its databases the same way, with the same dumps.
+
+## Security, and what it does not cover
+
+What this feature protects against:
+
+- No network exposure by default, the engine listens on the loopback.
+- One user per database, privileges bound to that database, no global privilege, no `GRANT OPTION`, no `FILE`.
+- Connection limits per user, so a misbehaving plugin cannot exhaust the engine for the others.
+- Clean revocation and rotation, and an audit entry for every creation, reveal, rotation and deletion.
+
+What it does not protect against, and this matters:
+
+**All Minecraft servers on the machine run under the same system user.** A malicious plugin installed on one server can read another server's `config.yml` and get its database credentials. Database isolation limits the damage if a password leaks off the machine, it does not isolate you from a hostile neighbour on the machine itself. If you host servers for people you do not trust, this feature does not make that safe.
+
+**The panel's own files are owned by root.** The service account can read and run them, never modify them. This matters because that account is allowed to run four scripts as root: if it could also edit them, anything running under it (the panel, any plugin) would be one line away from root on the machine. Installations created before 2026-09-22 do not have this, and a `shulkr update` currently restores the old ownership. Until that is settled, run `chown -R root:root /opt/shulkr && chown -R shulkr:shulkr /opt/shulkr/servers /opt/shulkr/backups /opt/shulkr/app/data && chown shulkr:shulkr /opt/shulkr/app/.env` after updating.
+
+**Server backups contain the databases.** Each backup writes a compressed dump of every database of that server into `.shulkr-databases/` inside the archive, so restoring brings the files and the data back to the same point. A dump that fails is reported in the logs and the backup still goes out: an archive missing one dump is worth more than no archive.
+
+Two consequences. Backups grow by the size of your databases. And a dump inside an archive is readable by anything running under the service account, like the rest of the archive, which already holds the plugin configuration files and their passwords.
+
+## If you suspect a leak
+
+1. Rotate the password of the database or the access concerned.
+2. Check the audit log, under Users, for reveals you did not make.
+3. Revoke every remote access you no longer use.
+4. Check that the engine is back to local-only listening if no remote access remains: the Databases page shows the current state.
