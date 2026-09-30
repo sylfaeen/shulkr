@@ -1,0 +1,45 @@
+.dark {
+  color-scheme: dark;
+
+  --shadow-card: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-inner: 0 0 1.5px 0.5px rgba(0, 0, 0, 0.4) inset;
+  --shadow-inner-xs: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 1px 0 rgba(0, 0, 0, 0.3), 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+  --shadow-dialog:
+    0px 0px 0px 1px #ffffff1c, 0px 64px 24px 0px #0000, 0px 44px 22px 0px #00000005, 0px 28px 20px 0px #00000014,
+    0px 17px 17px 0px #00000021, 0px 10px 13px 0px #00000026;
+
+  --status-online: #4ade80;
+  --status-offline: #a1a1aa;
+  --status-warning: #fbbf24;
+  --status-error: #f87171;
+
+  --background: #111113;
+  --foreground: #e4e4e7;
+  --card: #1b1b1f;
+  --card-foreground: #e4e4e7;
+  --popover: #1b1b1f;
+  --popover-foreground: #e4e4e7;
+  --primary: #e4e4e7;
+  --primary-foreground: #111113;
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: #e4e4e7;
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: #e4e4e7;
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: rgba(255, 255, 255, 0.08);
+  --input-border: rgba(255, 255, 255, 0.14);
+  --input-bg: #111113;
+  --input: oklch(0.269 0 0);
+  --ring: oklch(0.556 0 0);
+
+  --sidebar: #1b1b1f;
+  --sidebar-foreground: #e4e4e7;
+  --sidebar-primary: #e4e4e7;
+  --sidebar-primary-foreground: #111113;
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: #e4e4e7;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-ring: oklch(0.556 0 0);
+}
