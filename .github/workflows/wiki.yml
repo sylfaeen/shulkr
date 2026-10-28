@@ -1,0 +1,41 @@
+name: Publish wiki
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.repository == 'sylfaeen/shulkr'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Clone wiki
+        run: git clone "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.wiki.git" /tmp/wiki
+
+      - name: Sync docs to wiki
+        run: rsync -a --delete --exclude .git docs/ /tmp/wiki/
+
+      - name: Commit and push if changed
+        working-directory: /tmp/wiki
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Wiki already up to date"
+            exit 0
+          fi
+          git commit -m "docs: sync from ${{ github.sha }}"
+          git push
