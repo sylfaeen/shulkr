@@ -1,0 +1,17 @@
+packages:
+  - 'packages/*'
+allowBuilds:
+  bcrypt: true
+  better-sqlite3: true
+  esbuild: true
+  msw: true
+  sharp: true
+# pnpm 11 only reads overrides from this file, the former "pnpm.overrides" block in package.json was silently ignored
+overrides:
+  # archiver > readdir-glob > minimatch 5 kept a brace-expansion 2.x resolution with known ReDoS fixes missing
+  minimatch@5>brace-expansion: ^2.1.7
+  # monaco-editor imports its own vendored DOMPurify, this only keeps the declared but unused package patched
+  monaco-editor>dompurify: ^3.4.17
+  # The ESLint plugins accept zod ^3.25.0 || ^4.0.0, this keeps them off the vulnerable 3.x line
+  '@eslint-react/shared>zod': ^4.6.7
+  eslint-plugin-react-hooks>zod: ^4.6.7
