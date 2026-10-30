@@ -1,0 +1,76 @@
+import { initContract } from '@ts-rest/core';
+import { z } from 'zod';
+
+const c = initContract();
+
+const errorSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+});
+
+const pluginInfoSchema = z.object({
+  name: z.string(),
+  filename: z.string(),
+  enabled: z.boolean(),
+  size: z.number(),
+  modified: z.string(),
+  version: z.string().nullable(),
+  description: z.string().nullable(),
+  authors: z.array(z.string()),
+  marketplaceSource: z.enum(['modrinth', 'hangar']).nullable(),
+  marketplaceProjectId: z.string().nullable(),
+  marketplaceVersionId: z.string().nullable(),
+});
+
+export const pluginsContract = c.router({
+  list: {
+    method: 'GET',
+    path: '/api/servers/:serverId/plugins',
+    responses: {
+      200: z.object({
+        plugins: z.array(pluginInfoSchema),
+      }),
+      401: errorSchema,
+      403: errorSchema,
+      404: errorSchema,
+    },
+  },
+  toggle: {
+    method: 'POST',
+    path: '/api/servers/:serverId/plugins/toggle',
+    body: z.object({
+      filename: z.string(),
+    }),
+    responses: {
+      200: z.object({
+        name: z.string(),
+        enabled: z.boolean(),
+        message: z.string(),
+      }),
+      400: errorSchema,
+      401: errorSchema,
+      403: errorSchema,
+      404: errorSchema,
+      409: errorSchema,
+      429: errorSchema,
+      500: errorSchema,
+    },
+  },
+  delete: {
+    method: 'DELETE',
+    path: '/api/servers/:serverId/plugins/:filename',
+    body: null,
+    responses: {
+      200: z.object({
+        name: z.string(),
+        message: z.string(),
+      }),
+      400: errorSchema,
+      401: errorSchema,
+      403: errorSchema,
+      404: errorSchema,
+      429: errorSchema,
+      500: errorSchema,
+    },
+  },
+});
